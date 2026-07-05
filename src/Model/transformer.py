@@ -1,12 +1,46 @@
 import numpy as np
 import torch
-from src.Model.attention import MultiHeadAttention, SingleHeadAttention
+from src.Model.attention import MultiHeadAttention
 from src.Configs import DTYPE, TEMPERATURE, CONTEXT_WINDOW, DEVICE, \
-    W_UP_DIMENSION, N_FEATURES, QUERY_SIZE, N_ATTENTION_HEADS
+    W_UP_DIMENSION, N_FEATURES, N_ATTENTION_HEADS
+
+
+
+class TransformerBlock:
+    def __init__(self, n_features, n_head, context_window, w_up_dimension):
+        """
+        A single Transformer Layer containing independent Multi-Head Attention
+        and a Feed-Forward Network (MLP), complete with residual connections.
+        Used in Transformer class
+        """
+        # unique attention heads for this specific layer
+        self.attention = MultiHeadAttention(n_head, n_features, context_window=context_window)
+
+        # unique MLP weights for this specific layer
+        self.Wup = torch.randn((n_features, w_up_dimension), dtype=DTYPE, device=DEVICE) * (1.0 / np.sqrt(n_features))      # mlp
+        self.Wup.requires_grad_(True)
+        self.Wdown = torch.randn((w_up_dimension, n_features), dtype=DTYPE, device=DEVICE) * (1.0 / np.sqrt(w_up_dimension))
+        self.Wdown.requires_grad_(True)
+
+        self.params = self.attention.params + [self.Wup, self.Wdown]
+
+    def forward(self, x):
+        # Attention Layer + Residual Connection
+        x = x + self.attention.forward(x)
+
+        # MLP Feed-Forward Layer + Residual Connection
+        x = x + self.mlp(x)
+        return x
+
+    def mlp(self, x):
+        change = x @ self.Wup     # (n_vectors * wup)
+        change = torch.relu(change)
+        change = change @ self.Wdown
+        return change
 
 
 class Transformer:
-    def __init__(self, vocab_size):
+    def __init__(self, vocab_size, n_layers):
         self.vocab_size = vocab_size
 
         # raw embedding/unembedding matrices
@@ -14,20 +48,18 @@ class Transformer:
         self.W_embed.requires_grad_(True)   # rows are tokens, columns are features
         self.W_unembed = torch.randn((N_FEATURES, vocab_size), dtype=DTYPE, device=DEVICE)*(1.0 / np.sqrt(N_FEATURES))
         self.W_unembed.requires_grad_(True) # rows are features, columns are tokens
+
         # minute deviation from the paper: we use learned positional embedding matrix
         self.W_pos = torch.randn((CONTEXT_WINDOW, N_FEATURES), dtype=DTYPE,device=DEVICE) * (1.0 / np.sqrt(CONTEXT_WINDOW))
         self.W_pos.requires_grad_(True)     # embedding of the positions (learned by training). will be sliced for smaller windows
 
-        # self.attention = MultiHeadAttention(N_ATTENTION_HEADS, N_FEATURES, QUERY_SIZE, CONTEXT_WINDOW)
-        self.attention = MultiHeadAttention(N_ATTENTION_HEADS, N_FEATURES, QUERY_SIZE, context_window=CONTEXT_WINDOW)
-
-        self.Wup = torch.randn((N_FEATURES, W_UP_DIMENSION), dtype=DTYPE, device=DEVICE)*(1.0 / np.sqrt(N_FEATURES))    # mlp
-        self.Wup.requires_grad_(True)
-        self.Wdown = torch.randn((W_UP_DIMENSION, N_FEATURES), dtype=DTYPE, device=DEVICE)*(1.0 / np.sqrt(W_UP_DIMENSION))
-        self.Wdown.requires_grad_(True)
+        # Instantiate a list of independent sequential blocks
+        self.blocks = [TransformerBlock(N_FEATURES, N_ATTENTION_HEADS, CONTEXT_WINDOW, W_UP_DIMENSION) for _ in range(n_layers)]
 
         # gather all params in the entire model for pytorch gradient
-        self.params = [self.W_embed, self.W_unembed, self.W_pos, self.Wup, self.Wdown] + self.attention.params
+        self.params = [self.W_embed, self.W_unembed, self.W_pos]
+        for block in self.blocks:
+            self.params.extend(block.params)
 
 
     def forward(self, token_ids, seq_len):
@@ -36,27 +68,19 @@ class Transformer:
         else:
             token_ids = token_ids.to(DEVICE)    # (BATCH_SIZE * Block_size)
 
-        # 1. Embed tokens
+        # Embed tokens
         x = self.W_embed[token_ids]     # (BATCH_SIZE * Block_size * n_features)
 
         # Add positional encoding up to the current sequence length
         x = x + self.W_pos[:seq_len]
 
-        # 2. Attention + Residual connection
-        x = x + self.attention.forward(x)
+        # 2. Pass sequentially through all Transformer Blocks
+        for block in self.blocks:
+            x = block.forward(x)
 
-        x = x + self.mlp(x)
-
-        # 3. Unembed to get vocabulary logits
+        # Unembed to get vocabulary logits
         logits = x @ self.W_unembed
         return logits
-
-
-    def mlp(self, x):
-        change = x@self.Wup      # (n_vectors * wup)
-        change = torch.relu(change)
-        change = change @ self.Wdown
-        return change
 
 
     def pretrain_step(self, X_tokens, Y_targets, optimizer):
@@ -65,7 +89,6 @@ class Transformer:
 
         # X_tokens = (BATCH_SIZE * Block_size), seq_len = block size
         logits = self.forward(X_tokens, seq_len=X_tokens.size(1))
-        print(logits.shape, Y_targets.shape)
         loss = torch.nn.functional.cross_entropy(logits.view(-1, self.vocab_size), Y_targets.view(-1))
         loss.backward()
         # Adam handles the step update

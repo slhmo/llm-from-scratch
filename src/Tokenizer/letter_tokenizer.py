@@ -1,7 +1,5 @@
-import pandas
 import torch
 
-from src.Configs import DEVICE
 
 
 class Tokenizer:

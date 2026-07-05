@@ -9,11 +9,11 @@ class BPETokenizer:
         self.vocab: Dict[int, bytes] = {}
         self.merges: Dict[Tuple[int, int], int] = {}    # list of all the merges
 
-        # The GPT-2 regex split pattern ignore for now
-        # self.pat = re.compile(r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
+        # The GPT-2 regex split pattern
+        self.reg = re.compile(r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
 
     @staticmethod
-    def __replace_most_frequent_pair(text, replacement="XX"):
+    def __replace_most_frequent_pair(text, replacement):
         # all consecutive pairs
         pairs = [text[i:i + 2] for i in range(len(text) - 1)]
 
