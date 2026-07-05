@@ -1,6 +1,8 @@
 import pandas
 import torch
 
+from src.Configs import DEVICE
+
 
 class Tokenizer:
     def __init__(self):
@@ -31,19 +33,13 @@ class Tokenizer:
         return ''.join([self.int_to_char[i] for i in Integers])
 
 
-    def has_next(self, step, batch_size):
-        return step*batch_size+batch_size<len(self.data)
+    # def has_next(self, step, batch_size):
+    #     return step*batch_size+batch_size<len(self.data)
+    #
+    # def get_next_batch(self, batch_size, context_window):
+    #     # Pull random starting indices across the entire text
+    #     ix = torch.randint(0, len(self.all_tokens) - context_window - 1, (batch_size,))
+    #     x = torch.stack([self.all_tokens[i: i + context_window] for i in ix])
+    #     y = torch.stack([self.all_tokens[i + 1: i + context_window + 1] for i in ix])
+    #     return x.to(DEVICE), y.to(DEVICE)
 
-    def get_next_batch(self, batch_size, context_window):
-        # Pull random starting indices across the entire text
-        ix = torch.randint(0, len(self.all_tokens) - context_window - 1, (batch_size,))
-        x = torch.stack([self.all_tokens[i: i + context_window] for i in ix])
-        y = torch.stack([self.all_tokens[i + 1: i + context_window + 1] for i in ix])
-        return x, y
-
-
-# Tokenizer = Tokenizer()
-# Tokenizer.tokenize(('../../data/Tiny-Shakespeare.txt', ))
-# a = Tokenizer.decode((64, 23))
-# a = Tokenizer.encode(('z', 'K'))
-# print(a)

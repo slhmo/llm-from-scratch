@@ -1,9 +1,8 @@
 import numpy as np
 import torch
-from src.Model.attention import MultiHeadAttention
+from src.Model.attention import MultiHeadAttention, SingleHeadAttention
 from src.Configs import DTYPE, TEMPERATURE, CONTEXT_WINDOW, DEVICE, \
     W_UP_DIMENSION, N_FEATURES, QUERY_SIZE, N_ATTENTION_HEADS
-import torch.nn.functional as F
 
 
 class Transformer:
@@ -12,14 +11,15 @@ class Transformer:
 
         # raw embedding/unembedding matrices
         self.W_embed = torch.randn((vocab_size, N_FEATURES), dtype=DTYPE, device=DEVICE)*(1.0 / np.sqrt(vocab_size))
-        self.W_embed.requires_grad_(True)
+        self.W_embed.requires_grad_(True)   # rows are tokens, columns are features
         self.W_unembed = torch.randn((N_FEATURES, vocab_size), dtype=DTYPE, device=DEVICE)*(1.0 / np.sqrt(N_FEATURES))
-        self.W_unembed.requires_grad_(True)
+        self.W_unembed.requires_grad_(True) # rows are features, columns are tokens
         # minute deviation from the paper: we use learned positional embedding matrix
         self.W_pos = torch.randn((CONTEXT_WINDOW, N_FEATURES), dtype=DTYPE,device=DEVICE) * (1.0 / np.sqrt(CONTEXT_WINDOW))
-        self.W_pos.requires_grad_(True)
+        self.W_pos.requires_grad_(True)     # embedding of the positions (learned by training). will be sliced for smaller windows
 
-        self.attention = MultiHeadAttention(N_ATTENTION_HEADS, N_FEATURES, QUERY_SIZE)
+        # self.attention = MultiHeadAttention(N_ATTENTION_HEADS, N_FEATURES, QUERY_SIZE, CONTEXT_WINDOW)
+        self.attention = MultiHeadAttention(N_ATTENTION_HEADS, N_FEATURES, QUERY_SIZE, context_window=CONTEXT_WINDOW)
 
         self.Wup = torch.randn((N_FEATURES, W_UP_DIMENSION), dtype=DTYPE, device=DEVICE)*(1.0 / np.sqrt(N_FEATURES))    # mlp
         self.Wup.requires_grad_(True)
@@ -34,10 +34,10 @@ class Transformer:
         if not isinstance(token_ids, torch.Tensor):
             token_ids = torch.tensor(token_ids, dtype=torch.long, device=DEVICE)
         else:
-            token_ids = token_ids.to(DEVICE)
+            token_ids = token_ids.to(DEVICE)    # (BATCH_SIZE * Block_size)
 
         # 1. Embed tokens
-        x = self.W_embed[token_ids]
+        x = self.W_embed[token_ids]     # (BATCH_SIZE * Block_size * n_features)
 
         # Add positional encoding up to the current sequence length
         x = x + self.W_pos[:seq_len]
@@ -45,7 +45,6 @@ class Transformer:
         # 2. Attention + Residual connection
         x = x + self.attention.forward(x)
 
-        # NOTE: Your future MLP block will go right here (e.g., x = x + self.mlp.forward(x))
         x = x + self.mlp(x)
 
         # 3. Unembed to get vocabulary logits
@@ -60,23 +59,17 @@ class Transformer:
         return change
 
 
-    def pretrain_step(self, X_tokens, Y_targets, learning_rate):
-        """Processes a chunk of text, computes loss, and updates weights."""
+    def pretrain_step(self, X_tokens, Y_targets, optimizer):
         Y_targets = Y_targets.to(DEVICE)
-        # 1. Forward pass
-        logits = self.forward(X_tokens, seq_len=CONTEXT_WINDOW)     # train on context_window sized chunks
+        optimizer.zero_grad()
 
-        # 2. Compute loss Flatten dimensions to (Batch_size * Seq_len, Vocab_size) for cross_entropy
-        loss = F.cross_entropy(logits.view(-1, self.vocab_size), Y_targets.view(-1))
-
-        # 3. Backward pass (calculates .grad for all params)
+        # X_tokens = (BATCH_SIZE * Block_size), seq_len = block size
+        logits = self.forward(X_tokens, seq_len=X_tokens.size(1))
+        print(logits.shape, Y_targets.shape)
+        loss = torch.nn.functional.cross_entropy(logits.view(-1, self.vocab_size), Y_targets.view(-1))
         loss.backward()
-
-        # 4. Manual SGD weight update step
-        with torch.no_grad():
-            for p in self.params:
-                p -= learning_rate * p.grad
-                p.grad.zero_()  # Reset for next time
+        # Adam handles the step update
+        optimizer.step()
 
         return loss.item()
 

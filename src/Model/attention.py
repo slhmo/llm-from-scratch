@@ -2,10 +2,10 @@ import torch
 import numpy as np
 from src.Configs import DTYPE, DEVICE
 
+
 class SingleHeadAttention:
     def __init__(self, n_features, query_size):
         """
-
         :param n_features: number of features in embedding space
         :param query_size: query vector size
         """
@@ -55,7 +55,7 @@ class SingleHeadAttention:
 
 
 class MultiHeadAttention:
-    def __init__(self, n_head, n_features, query_size):
+    def __init__(self, n_head, n_features, query_size, context_window):
         """
         Vectorized Multi-Head Attention that runs all heads in parallel using
         PyTorch's tensor broadcasting.
@@ -78,6 +78,9 @@ class MultiHeadAttention:
         self.value_down_matrix = torch.randn((n_head, query_size, n_features), dtype=DTYPE, device=DEVICE) * ( 1.0 / np.sqrt(query_size))
         self.value_down_matrix.requires_grad_(True)
 
+        mask = torch.full((context_window, context_window), float('-inf'), device=DEVICE)
+        self.mask = torch.triu(mask, diagonal=1) # Lower triangle is 0.0, upper is -inf
+
         # Track all parameters for SGD optimization step
         self.params = [self.query_matrix, self.key_matrix, self.value_up_matrix, self.value_down_matrix]
 
@@ -96,9 +99,8 @@ class MultiHeadAttention:
 
         # mask = torch.triu(torch.ones_like(scores), diagonal=1).bool()     # inefficient
         seq_len = scores.size(-1)
-        mask = torch.triu(torch.ones((seq_len, seq_len), device=scores.device), diagonal=1).bool()  # efficient. exploiting broadcasting
 
-        scores = scores.masked_fill(mask, float('-inf'))
+        scores = scores + self.mask[:seq_len, :seq_len]
 
         attention_pattern = torch.softmax(scores / np.sqrt(self.query_size), dim=-1)
 
