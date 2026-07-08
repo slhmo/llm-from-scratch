@@ -1,2 +1,0 @@
-first train tokenizer,
-then create tokenized data for model

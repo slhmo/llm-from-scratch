@@ -98,7 +98,6 @@ class Transformer:
         # torch.compile will struggle with the dynamic, changing sequence lengths
         # by having 2 forwards one for train and 1 for prediction we can be sure that train's forward method always gets tensors of static size and we can optimize
         self.eager_forward = self.forward
-        self.scaler = torch.amp.GradScaler(device_type='cuda', enabled=('cuda' in str(DEVICE)))     # todo
 
 
     def forward(self, token_ids, seq_len):
@@ -132,36 +131,16 @@ class Transformer:
 
         device_type = 'cuda' if 'cuda' in str(DEVICE) else 'cpu'
         # X_tokens = (BATCH_SIZE * Block_size), seq_len = block size
-
         # Run the heavy matrix multiplications in fast 16-bit precision
-        # with torch.amp.autocast(device_type=device_type, dtype=torch.bfloat16):     # remove if your gpu doesn't support bfloat16
-        #     logits = self.forward(X_tokens, seq_len=X_tokens.size(1))
-        #     loss = torch.nn.functional.cross_entropy(logits.view(-1, self.vocab_size), Y_targets.view(-1))
-
-        # src/train_model.py (Inside your training step loop)
-        with torch.amp.autocast(device_type=device_type, dtype=torch.float16):      # todo
+        with torch.amp.autocast(device_type=device_type, dtype=torch.bfloat16):     # remove if your gpu doesn't support bfloat16
             logits = self.forward(X_tokens, seq_len=X_tokens.size(1))
-            loss = torch.nn.functional.cross_entropy(
-                logits.view(-1, self.vocab_size), Y_targets.view(-1))
+            loss = torch.nn.functional.cross_entropy(logits.view(-1, self.vocab_size), Y_targets.view(-1))
 
-        # todo
-        # # logits = self.forward(X_tokens, seq_len=X_tokens.size(1))
-        # # loss = torch.nn.functional.cross_entropy(logits.view(-1, self.vocab_size), Y_targets.view(-1))
-        # loss.backward()
-        # # Adam handles the step update
-        # optimizer.step()
-        # scheduler.step()
-
-        # 2. Scale the loss and calculate gradients safely
-        self.scaler.scale(loss).backward()
-
-        # 3. Unscale gradients and step the optimizer
-        self.scaler.step(optimizer)
-
-        # 4. Update the scale factor for the next iteration
-        self.scaler.update()
-
-        # 5. Advance the learning rate scheduler
+        # logits = self.forward(X_tokens, seq_len=X_tokens.size(1))
+        # loss = torch.nn.functional.cross_entropy(logits.view(-1, self.vocab_size), Y_targets.view(-1))
+        loss.backward()
+        # Adam handles the step update
+        optimizer.step()
         scheduler.step()
 
         return loss.item()

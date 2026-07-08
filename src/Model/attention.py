@@ -118,6 +118,9 @@ class SingleHeadAttention:
 
 
 class MultiHeadAttention:
+    """
+    Uses 2D GEMM for optimization. to understand, I recommend read SingleHeadAttention and then two commented out classes above.
+    """
     def __init__(self, n_head, n_features, context_window):
         self.n_head = n_head
         self.n_features = n_features

@@ -4,3 +4,5 @@ venv
 *.py[cod]
 repomix-output.xml
 data
+src/Model/transformer_weights.pt
+output
