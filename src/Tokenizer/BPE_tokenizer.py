@@ -1,40 +1,21 @@
+import collections
 import pickle
 from typing import List, Dict, Tuple        # increase readability
-from collections import Counter
 import regex as re
 
 class BPETokenizer:
-    def __init__(self, vocab_size):
-        self.vocab_size = vocab_size
+    def __init__(self, vocab_size, special_tokens: List[str] = None):
+        special_tokens = special_tokens or []       # emtpy list if None
+        self.vocab_size = vocab_size-len(special_tokens)        # leave some space for special tokens
         self.vocab: Dict[int, bytes] = {}
         self.merges: Dict[Tuple[int, int], int] = {}    # list of all the merges
 
-        # The GPT-2 regex split pattern
-        self.reg = re.compile(r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
+        # GPT-4 regex
+        self.reg = re.compile(r"""'(?i:[sdmtlre]|ll|ve)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+""")
+        self.vocab_special_tokens: Dict[str, int] = {}
 
-    @staticmethod
-    def __replace_most_frequent_pair(text, replacement):
-        # all consecutive pairs
-        pairs = [text[i:i + 2] for i in range(len(text) - 1)]
-
-        # count occurrences and find the most common one
-        # .most_common(1) returns [(pair, count)]
-        counts = Counter(pairs)
-        if not counts:
-            return text
-
-        most_common_pair, _ = counts.most_common(1)[0]
-
-        # 3. Replace the pair
-        return text.replace(most_common_pair, replacement)
-
-    @staticmethod
-    def __get_consecutive_pairs(list_):
-        """Counts all consecutive pairs of integers in a single pass."""
-        counts = {}
-        for pair in zip(list_, list_[1:]):
-            counts[pair] = counts.get(pair, 0) + 1
-        return counts
+        for i in range(len(special_tokens)):
+            self.vocab_special_tokens[special_tokens[i]] = i + self.vocab_size
 
     @staticmethod
     def replace_pair(list_, pair, value):
@@ -50,51 +31,115 @@ class BPETokenizer:
         return updated_list
 
 
-    def train(self, paths_to_data, verbose=False):
+    def train(self, data, verbose=False):
         if self.vocab_size<256: raise ValueError("Vocabulary size must be at least 256 to accommodate raw bytes.")
         num_merges = self.vocab_size - 256
         self.vocab = {i: bytes([i]) for i in range(256)}  # initially, all bytes
+        for token, special_id in self.vocab_special_tokens.items():     # then add special tokens
+            self.vocab[special_id] = token.encode('utf-8')
 
-        print("Loading and converting dataset to raw bytes...")
-        raw_bytes = bytearray()
-        for path in paths_to_data:
-            with open(path, 'rb') as f:     # read binary
-                raw_bytes.extend(f.read())
+        print("Applying regex pre-tokenization split...")
+        chunks = [list(chunk.encode('utf-8')) for chunk in self.reg.findall(data)]
+        del data
 
-        # convert bytearray to a list of integers and delete that
-        list_ids = list(raw_bytes)
-        del raw_bytes
         print(f"Starting BPE training for {num_merges} merges...")
 
+        # find pairs number of occurrences once, we'll update this with every merge, removing O(n^2) bottleneck
+        pairs = {}
+        pair_to_chunks = collections.defaultdict(set)   # maps every pair tuple -> a set of chunk indices that contain it
+
+        for chunk_idx, chunk in enumerate(chunks):
+            for pair in zip(chunk, chunk[1:]):
+                pairs[pair] = pairs.get(pair, 0) + 1
+                pair_to_chunks[pair].add(chunk_idx)
+
         for i in range(num_merges):
-            # find pair with most occurrences
-            pairs = self.__get_consecutive_pairs(list_ids)
             if not pairs:
                 break  # Nothing left to merge
 
             best_pair = max(pairs, key=pairs.get)
+
             # replace anywhere the pair occurred with their new encoding(256+i)
             new_id = 256+i
-            list_ids = self.replace_pair(list_ids, best_pair, new_id)
             self.merges[best_pair] = new_id
             self.vocab[new_id] = self.vocab[best_pair[0]] + self.vocab[best_pair[1]]
+
+            # apply merge across only affected chunks evading O(n^2)
+            affected_chunk_indices = list(pair_to_chunks.get(best_pair, set()))
+            for chunk_idx in affected_chunk_indices:
+                old_chunk = chunks[chunk_idx]
+                # step 1 => remove all current pairs of this specific chunk from pairs temporarily
+                for pair in zip(old_chunk, old_chunk[1:]):
+                    pairs[pair] -= 1
+                    if pairs[pair] <= 0:
+                        del pairs[pair]
+
+                    pair_to_chunks[pair].discard(chunk_idx)     # well the pair is not in this chunk anymore because we just removed it
+                    if not pair_to_chunks[pair]:
+                        del pair_to_chunks[pair]
+
+                # Step 2 => Merge the pair inside this single isolated chunk
+                new_chunk = self.replace_pair(old_chunk, best_pair, new_id)
+                chunks[chunk_idx] = new_chunk
+
+                # Step 3 => Register the newly formed pairs from this chunk into global tracking
+                for pair in zip(new_chunk, new_chunk[1:]):
+                    pairs[pair] = pairs.get(pair, 0) + 1
+                    pair_to_chunks[pair].add(chunk_idx)
+
             if verbose and i % 10 == 0:
                 print(f"Merge {i + 1}/{num_merges}: {best_pair} -> {new_id} ({self.vocab[new_id].decode('utf-8', errors='replace')!r})")
 
-    def encode(self, text) -> List[int]:
-        """Converts a raw string into a list of token IDs using learned merge rules."""
-        list_ids = list(text.encode("utf-8"))
-        while len(list_ids) >= 2:     # obviously we cant merge for smaller strings
-            pairs = self.__get_consecutive_pairs(list_ids)
-            # find the pair that was merged earliest during the training cycle
-            pair = min(pairs.keys(), key=lambda p: self.merges.get(p, float('inf')))
 
-            if pair not in self.merges:
-                break  # no more eligible merge transformations available
 
-            new_id = self.merges[pair]      # new id assigned for that pair
-            list_ids = self.replace_pair(list_ids, pair, new_id)
-        return list_ids
+    def _encode(self, text) -> List[int]:
+        """Converts a raw string into a list of token IDs using learned merge rules.
+        doesn't handle special tokens """
+
+        text_chunks = self.reg.findall(text)
+        final_ids = []
+
+        # We process each chunk separately
+        for chunk in text_chunks:
+            chunk_ids = list(chunk.encode("utf-8"))
+
+            while len(chunk_ids) >= 2:     # obviously we cant merge for smaller strings
+                # find all valid merge candidates in this chunk that exist in our vocabulary
+                valid_pairs = [p for p in zip(chunk_ids, chunk_ids[1:]) if p in self.merges]
+                if not valid_pairs: # no more eligible merge transformations available
+                    break
+
+                # find the pair that was merged earliest during the training cycle
+                pair = min(valid_pairs, key=lambda p: self.merges[p])
+
+                new_id = self.merges[pair]      # new id assigned for that pair
+                chunk_ids = self.replace_pair(chunk_ids, pair, new_id)
+            final_ids.extend(chunk_ids)
+
+        return final_ids
+
+
+    def encode(self, text, special_tokens_allowed: bool=False) -> List[int]:
+        if not self.vocab_special_tokens:   # no special tokens anyway
+            return self._encode(text)
+        if not special_tokens_allowed:
+            return self._encode(text)
+
+        special_pattern = re.compile("(" + "|".join(re.escape(t) for t in self.vocab_special_tokens.keys()) + ")")
+        parts = special_pattern.split(text)
+
+        final_ids = []
+        for part in parts:      # in the chopped of pieces, if the piece is a special token, use special token's table. else do normal
+            if part in self.vocab_special_tokens:
+                # Directly map the special token to its ID
+                final_ids.append(self.vocab_special_tokens[part])
+            elif part:
+                # Regular text segment gets processed by normal BPE
+                final_ids.extend(self._encode(part))
+
+        return final_ids
+
+
 
     def decode(self, list_ids: List[int]) -> str:
         text_bytes = b"".join(self.vocab[idx] for idx in list_ids)
@@ -105,7 +150,8 @@ class BPETokenizer:
         state = {
             "vocab": self.vocab,
             "merges": self.merges,
-            "vocab_size": self.vocab_size
+            "vocab_size": self.vocab_size,
+            "vocab_special_tokens": self.vocab_special_tokens
         }
         with open(file_path, "wb") as f:
             pickle.dump(state, f)
@@ -118,5 +164,6 @@ class BPETokenizer:
         self.vocab = state["vocab"]
         self.merges = state["merges"]
         self.vocab_size = state["vocab_size"]
+        self.vocab_special_tokens = state.get("vocab_special_tokens", {})
         print(f"Tokenizer loaded from {file_path}")
 

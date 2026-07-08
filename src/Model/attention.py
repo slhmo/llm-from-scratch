@@ -168,4 +168,4 @@ class MultiHeadAttention:
         out = attention_output.transpose(1, 2).contiguous().view(B, T, C)
 
         # Final output projection to mix head representations back into the residual stream
-        return out @ self.out_proj
+        return out @ self.out_proj  # outputs must pass through an output projection matrix W_O to bring them back down to the proper variance

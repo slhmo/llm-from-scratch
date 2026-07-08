@@ -1,2 +1,2 @@
-Phase1:
-Character-level Transformer predicting the next character. Train on tiny Shakespeare Dataset.
+first train tokenizer,
+then create tokenized data for model
