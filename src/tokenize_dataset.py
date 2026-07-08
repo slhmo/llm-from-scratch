@@ -11,7 +11,7 @@ def prepare_data(csv_path, output_bin_path, chunk_size=2000):
     tokenizer = BPETokenizer(VOCAB_SIZE, special_tokens=SPECIAL_TOKENS)
     tokenizer.load(TOKENIZER_PATH)
 
-    # Extract the auto-assigned ID for your special token
+    # get the auto-assigned ID for special token
     eot_id = tokenizer.vocab_special_tokens["<|endoftext|>"]
 
     print(f"Tokenizing {csv_path} -> {output_bin_path}")
@@ -26,14 +26,11 @@ def prepare_data(csv_path, output_bin_path, chunk_size=2000):
             for text in chunk['text']:
                 if pd.isna(text):
                     continue
-
                 # encode actual story content
                 ids = tokenizer.encode(str(text))
                 chunk_tokens.extend(ids)
-
                 # append the delimiter token after the story finishes
                 chunk_tokens.append(eot_id)
-
             # flush the combined array segment to disk
             if chunk_tokens:
                 np_array = np.array(chunk_tokens, dtype=np.uint16)
@@ -46,5 +43,5 @@ def prepare_data(csv_path, output_bin_path, chunk_size=2000):
 
 
 if __name__ == '__main__':
-    train_csv = RAW_TRAIN_PATH  # Change to your actual train split path
+    train_csv = RAW_TRAIN_PATH
     prepare_data(train_csv, TOKENIZED_TRAIN_PATH)

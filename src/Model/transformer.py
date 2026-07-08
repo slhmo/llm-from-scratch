@@ -98,6 +98,7 @@ class Transformer:
         # torch.compile will struggle with the dynamic, changing sequence lengths
         # by having 2 forwards one for train and 1 for prediction we can be sure that train's forward method always gets tensors of static size and we can optimize
         self.eager_forward = self.forward
+        self.scaler = torch.amp.GradScaler(device_type='cuda', enabled=('cuda' in str(DEVICE)))     # todo
 
 
     def forward(self, token_ids, seq_len):
@@ -124,23 +125,44 @@ class Transformer:
         return logits
 
 
-    def pretrain_step(self, X_tokens, Y_targets, optimizer):
+    def pretrain_step(self, X_tokens, Y_targets, optimizer, scheduler):
         Y_targets = Y_targets.to(DEVICE)
         X_tokens = X_tokens.to(DEVICE)
         optimizer.zero_grad()
 
         device_type = 'cuda' if 'cuda' in str(DEVICE) else 'cpu'
         # X_tokens = (BATCH_SIZE * Block_size), seq_len = block size
-        # Run the heavy matrix multiplications in fast 16-bit precision
-        with torch.amp.autocast(device_type=device_type, dtype=torch.bfloat16):     # remove if your gpu doesn't support bfloat16
-            logits = self.forward(X_tokens, seq_len=X_tokens.size(1))
-            loss = torch.nn.functional.cross_entropy(logits.view(-1, self.vocab_size), Y_targets.view(-1))
 
-        # logits = self.forward(X_tokens, seq_len=X_tokens.size(1))
-        # loss = torch.nn.functional.cross_entropy(logits.view(-1, self.vocab_size), Y_targets.view(-1))
-        loss.backward()
-        # Adam handles the step update
-        optimizer.step()
+        # Run the heavy matrix multiplications in fast 16-bit precision
+        # with torch.amp.autocast(device_type=device_type, dtype=torch.bfloat16):     # remove if your gpu doesn't support bfloat16
+        #     logits = self.forward(X_tokens, seq_len=X_tokens.size(1))
+        #     loss = torch.nn.functional.cross_entropy(logits.view(-1, self.vocab_size), Y_targets.view(-1))
+
+        # src/train_model.py (Inside your training step loop)
+        with torch.amp.autocast(device_type=device_type, dtype=torch.float16):      # todo
+            logits = self.forward(X_tokens, seq_len=X_tokens.size(1))
+            loss = torch.nn.functional.cross_entropy(
+                logits.view(-1, self.vocab_size), Y_targets.view(-1))
+
+        # todo
+        # # logits = self.forward(X_tokens, seq_len=X_tokens.size(1))
+        # # loss = torch.nn.functional.cross_entropy(logits.view(-1, self.vocab_size), Y_targets.view(-1))
+        # loss.backward()
+        # # Adam handles the step update
+        # optimizer.step()
+        # scheduler.step()
+
+        # 2. Scale the loss and calculate gradients safely
+        self.scaler.scale(loss).backward()
+
+        # 3. Unscale gradients and step the optimizer
+        self.scaler.step(optimizer)
+
+        # 4. Update the scale factor for the next iteration
+        self.scaler.update()
+
+        # 5. Advance the learning rate scheduler
+        scheduler.step()
 
         return loss.item()
 
@@ -172,3 +194,59 @@ class Transformer:
                 context.append(next_token_id)
 
         return tokenizer.decode(context)
+
+    def save_weights(self, file_path):
+        """save weights to disk"""
+        state = {
+            'W_embed': self.W_embed.data.cpu(),
+            'W_pos': self.W_pos.data.cpu(),
+            'ln_f': {
+                'gamma': self.ln_f.gamma.data.cpu(),
+                'beta': self.ln_f.beta.data.cpu()
+            },
+            'blocks': [
+                {
+                    'ln1': {'gamma': b.ln1.gamma.data.cpu(),
+                            'beta': b.ln1.beta.data.cpu()},
+                    'ln2': {'gamma': b.ln2.gamma.data.cpu(),
+                            'beta': b.ln2.beta.data.cpu()},
+                    'q_proj': b.attention.q_proj.data.cpu(),
+                    'k_proj': b.attention.k_proj.data.cpu(),
+                    'v_proj': b.attention.v_proj.data.cpu(),
+                    'out_proj': b.attention.out_proj.data.cpu(),
+                    'Wup': b.Wup.data.cpu(),
+                    'Wdown': b.Wdown.data.cpu(),
+                } for b in self.blocks
+            ]
+        }
+        torch.save(state, file_path)
+        print(f"saved weights to {file_path}")
+
+    def load_weights(self, file_path):
+        """Loads and updates weights"""
+        import os
+        if not os.path.exists(file_path):
+            print(f"wrong path: {file_path}")
+            return
+
+        state = torch.load(file_path, map_location=DEVICE)
+        with torch.no_grad():
+            self.W_embed.copy_(state['W_embed'])
+            self.W_pos.copy_(state['W_pos'])
+            self.ln_f.gamma.copy_(state['ln_f']['gamma'])
+            self.ln_f.beta.copy_(state['ln_f']['beta'])
+
+            for i, b in enumerate(self.blocks):
+                b_state = state['blocks'][i]
+                b.ln1.gamma.copy_(b_state['ln1']['gamma'])
+                b.ln1.beta.copy_(b_state['ln1']['beta'])
+                b.ln2.gamma.copy_(b_state['ln2']['gamma'])
+                b.ln2.beta.copy_(b_state['ln2']['beta'])
+                b.attention.q_proj.copy_(b_state['q_proj'])
+                b.attention.k_proj.copy_(b_state['k_proj'])
+                b.attention.v_proj.copy_(b_state['v_proj'])
+                b.attention.out_proj.copy_(b_state['out_proj'])
+                b.Wup.copy_(b_state['Wup'])
+                b.Wdown.copy_(b_state['Wdown'])
+
+        print(f"Successfully loaded weights from {file_path}!")
